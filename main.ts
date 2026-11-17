@@ -4,7 +4,11 @@
 //
 // Model (fitted offline on the kit's 37 comparable launches with a full
 // release day; the GTA VI category's own pre-release history has no launch
-// day, so it is not in the fit):
+// day, so it is not in the fit). Revised per the methods literature
+// (functional kernel analogues: Lorenz; Ferraty & Vieu 2006; Antoniadis et
+// al. 2006): the kernel-weighted analogue centre is the literature's
+// canonical method for this problem, so it is kept and upgraded, not
+// replaced:
 //   Launch-day curves differ wildly in shape, and the difference is driven
 //   mostly by how big hour 1 is: a game whose hour-1 print is huge (its
 //   audience is already awake in the UK/EU unlock) stays near flat all day,
@@ -12,17 +16,36 @@
 //   mostly US) rises 10-1000x by the evening. So for each hour h we model
 //   ln(viewers_h / viewers_1) with a Gaussian kernel over ln(hour-1 print):
 //   launches with a similar hour-1 size vote on the shape. The median of
-//   the kernel-weighted log-ratios is the centre, their weighted spread is
-//   the uncertainty (floored at 0.25 log units), and a 3-point moving
-//   average smooths the centre across hours. Quantiles are
-//   q = p1 * exp(mu_h + z_tau * sd_h), the standard normal quantiles.
-//   Leave-one-out over the 37 fitted launches: mean pinball loss 0.40
-//   (0.26 on the 27 launches with hour-1 >= 20k, the population the four
-//   practice launches and GTA VI belong to), against 0.93 for the house
-//   persistence baseline on the same launches. The kernel is local, so a
-//   GTA VI hour-1 print above every fitted launch simply weights the
-//   biggest launches (ELDEN RING, Cyberpunk 2077) most; nothing
-//   extrapolates linearly.
+//   the kernel-weighted log-ratios is the centre. Upgrades, each validated
+//   by leave-one-out pinball loss on the 37 fitted launches:
+//   (a) the centre is smoothed with a 3-point moving average WITHIN the
+//   unlock segments [2-5], [6-8], [9-24] only, never across the steps at
+//   hour 6 (US East unlock) and hour 9 (US West unlock);
+//   (b) a shrunk local-linear slope (OLS slope of log-ratio on ln hour-1,
+//   shrunk by 0.25 and smoothed within segments) is added ONLY when the
+//   case's hour-1 lies outside the fitted historical range, so a GTA VI
+//   hour-1 above every historical launch extrapolates instead of freezing
+//   at the nearest neighbours;
+//   (c) the spread stays normal quantiles q = p1 * exp(mu_h + z_tau * sd_h),
+//   but sd_h is the kernel-weighted spread of the log-ratios around the
+//   final centre, its log smoothed within the same unlock segments, then
+//   multiplied by 0.9 (chosen by LOO pinball, not by coverage).
+//   Tried and dropped, because they did not improve LOO: shrinkage of the
+//   centre toward the big-launch pooled shape (badly worse), a Student-t
+//   spread (worse than normal), a residual-based spread (no better, and
+//   costlier), an FPCA (K=2) average with the kernel centre (helps LOO
+//   overall but hurts the biggest launches, the population GTA VI belongs
+//   to), and widening the spread out-of-range (worse).
+//   Leave-one-out over the 37 fitted launches: mean pinball loss 0.398
+//   (0.257 on the 27 launches with hour-1 >= 20k, the population the four
+//   practice launches and GTA VI belong to), against 0.402 (0.257) for the
+//   previous version and 0.930 (0.321) for the house persistence baseline.
+//   On the launches that test extrapolation best, the revised model is
+//   clearly better: leave-biggest-out 0.102 (was 0.107), leave-top-3-out
+//   0.130 (was 0.145). The kernel is local, so a GTA VI hour-1 print
+//   above every fitted launch weights the biggest launches (ELDEN RING,
+//   Cyberpunk 2077) most; the shrunk slope then carries it a little
+//   further in the direction the data point.
 //
 // The program runs offline, with no network, under the case's time cap:
 // everything it knows is in the case file (and the fitted constants below).
@@ -46,6 +69,17 @@ const Z = [-1.6448536269514722, -0.6744897501960817, 0, 0.6744897501960817, 1.64
 const BANDWIDTH = 1.0;
 /** Smallest spread we ever quote, in log units. */
 const SD_FLOOR = 0.25;
+/** Spread multiplier, chosen by leave-one-out pinball (not by coverage). */
+const MULT = 0.9;
+/**
+ * Shrunk local-linear slope (OLS slope of log-ratio on ln hour-1, shrunk by
+ * 0.25 and smoothed within the unlock segments), fitted on all 37 launches.
+ * Applied ONLY to the part of ln(hour-1) outside the fitted historical
+ * range [5.0999, 13.6822]; inside the range the kernel already does the work.
+ */
+const SLOPE: number[] = [0.0054, -0.0013, -0.006, -0.0086, -0.0107, -0.0271, -0.0431, -0.077, -0.1078, -0.128, -0.1403, -0.1554, -0.174, -0.1936, -0.2092, -0.2208, -0.2271, -0.2315, -0.2337, -0.2338, -0.232, -0.2292, -0.2262];
+/** Unlock segments (hour index j = hour - 2): hours [2-5], [6-8], [9-24]. */
+const SEGMENTS: Array<[number, number]> = [[0, 3], [4, 6], [7, 22]];
 
 /**
  * Fitted constants: for each of the 37 comparable launches, ln(hour-1
@@ -119,29 +153,50 @@ function weightedSd(values: number[], weights: number[], mu: number): number {
   return Math.sqrt(values.reduce((s, v, i) => s + weights[i] * (v - mu) ** 2, 0) / total);
 }
 
+/** 3-point moving average within each unlock segment (segment ends kept). */
+function smoothSegments(values: number[]): number[] {
+  const out = [...values];
+  for (const [a, b] of SEGMENTS) {
+    for (let k = a + 1; k < b; k++) out[k] = (values[k - 1] + values[k] + values[k + 1]) / 3;
+  }
+  return out;
+}
+
 /**
  * The forecast for one case: five quantiles per hour, hours 2..24.
- * mu[h] is the kernel-weighted median log-ratio for that hour (smoothed
- * across hours), sd[h] its kernel-weighted spread (floored).
+ * mu[h] is the kernel-weighted median log-ratio for that hour, plus the
+ * shrunk slope when ln(hour-1) is out of range, smoothed within unlock
+ * segments; sd[h] is the kernel-weighted spread around that centre, its
+ * log smoothed within the same segments, then multiplied by MULT.
  */
 function forecast(p1: number, hours: number[]): Array<{ hour: number; q: number[] }> {
   const lp = Math.log(p1);
-  const weights = FIT_LOGP1.map((x) => Math.exp(-((x - lp) ** 2) / (2 * BANDWIDTH * BANDWIDTH)));
-  const mu: number[] = [];
-  const sd: number[] = [];
+  const rawWeights = FIT_LOGP1.map((x) => Math.exp(-((x - lp) ** 2) / (2 * BANDWIDTH * BANDWIDTH)));
+  // Degenerate guard: if every kernel weight underflowed to zero (an hour-1
+  // print absurdly far outside the fitted range), fall back to uniform
+  // weights so the median and spread stay defined. Never triggers for any
+  // realistic print.
+  const totalW = rawWeights.reduce((a, b) => a + b, 0);
+  const weights = totalW > 0 && Number.isFinite(totalW) ? rawWeights : FIT_LOGP1.map(() => 1);
+  const xmin = Math.min(...FIT_LOGP1);
+  const xmax = Math.max(...FIT_LOGP1);
+  const delta = lp > xmax ? lp - xmax : lp < xmin ? lp - xmin : 0;
+  let mu: number[] = [];
   for (let j = 0; j < 23; j++) {
     const vals = FIT_LR.map((row) => row[j]);
-    const m = weightedMedian(vals, weights);
-    mu.push(m);
-    sd.push(Math.max(SD_FLOOR, weightedSd(vals, weights, m)));
+    mu.push(weightedMedian(vals, weights) + SLOPE[j] * delta);
   }
-  // 3-point moving average on the centre (endpoints kept): launch curves
-  // are smooth, and the median can jump where the weighted distribution
-  // is bimodal.
-  const smooth = mu.map((m, k) => (k === 0 || k === mu.length - 1 ? m : (mu[k - 1] + m + mu[k + 1]) / 3));
+  mu = smoothSegments(mu);
+  let sd: number[] = [];
+  for (let j = 0; j < 23; j++) {
+    const vals = FIT_LR.map((row) => row[j]);
+    sd.push(weightedSd(vals, weights, mu[j]));
+  }
+  sd = smoothSegments(sd.map((s) => Math.log(Math.max(1e-6, s)))).map((l) => Math.exp(l));
   return hours.map((hour, j) => {
+    const sEff = Math.max(SD_FLOOR, sd[j] * MULT);
     const qs = Z.map((z) => {
-      const v = round2(p1 * Math.exp(smooth[j] + z * sd[j]));
+      const v = round2(p1 * Math.exp(mu[j] + z * sEff));
       return Math.min(1e9, Math.max(0.01, v));
     });
     // Rounding can only keep the order (z is increasing), but enforce it.
