@@ -27,36 +27,66 @@
 //   audience is already awake in the UK/EU unlock) stays near flat all day,
 //   while a game whose hour-1 print is tiny (its audience unlocks later,
 //   mostly US) rises 10-1000x by the evening. So for each hour h we model
-//   ln(viewers_h / viewers_1) with a Gaussian kernel over ln(hour-1 print):
+//   ln(viewers_h / viewers_1) with a kernel over ln(hour-1 print):
 //   launches with a similar hour-1 size vote on the shape. The median of
 //   the kernel-weighted log-ratios is the centre. Upgrades, each validated
 //   by leave-one-out pinball loss on the 37 fitted launches:
-//   (a) the centre is smoothed with a 3-point moving average WITHIN the
+//   (a) the kernel is Epanechnikov (finite support) with bandwidth 2.0 in
+//   ln(hour-1): it beat the Gaussian kernel at every bandwidth (0.5-2.0)
+//   on the extrapolation metrics, and its hard window keeps far-away
+//   launches (the tiny-hour-1 risers) from voting on a mega launch;
+//   (b) the centre is smoothed with a 3-point moving average WITHIN the
 //   unlock segments [2-5], [6-8], [9-24] only, never across the steps at
 //   hour 6 (US East unlock) and hour 9 (US West unlock);
-//   (b) a shrunk local-linear slope (OLS slope of log-ratio on ln hour-1,
+//   (c) the smoothed centre is averaged 50/50 with its projection onto
+//   the first functional principal component of the 37 launch curves
+//   (PC1 carries 88% of the shape variance: the flat-vs-rising axis);
+//   the projection pulls each hour's centre toward the dominant shape
+//   mode without imposing a single pooled curve;
+//   (d) a shrunk local-linear slope (OLS slope of log-ratio on ln hour-1,
 //   shrunk by 0.25 and smoothed within segments) is added ONLY when the
 //   case's hour-1 lies outside the fitted historical range, so a GTA VI
 //   hour-1 above every historical launch extrapolates instead of freezing
 //   at the nearest neighbours;
-//   (c) the spread stays normal quantiles q = p1 * exp(mu_h + z_tau * sd_h),
+//   (e) the spread stays normal quantiles q = p1 * exp(mu_h + z_tau * sd_h),
 //   but sd_h is the kernel-weighted spread of the log-ratios around the
 //   final centre, its log smoothed within the same unlock segments, then
-//   multiplied by 0.9 (chosen by LOO pinball, not by coverage).
-//   Tried and dropped, because they did not improve LOO: shrinkage of the
-//   centre toward the big-launch pooled shape (badly worse), a Student-t
-//   spread (worse than normal), a residual-based spread (no better, and
-//   costlier), an FPCA (K=2) average with the kernel centre (helps LOO
-//   overall but hurts the biggest launches, the population GTA VI belongs
-//   to), and widening the spread out-of-range (worse).
-//   Leave-one-out over the 37 fitted launches: mean pinball loss 0.398
-//   (0.257 on the 27 launches with hour-1 >= 20k, the population the four
-//   practice launches and GTA VI belong to), against 0.402 (0.257) for the
-//   previous version and 0.930 (0.321) for the house persistence baseline.
-//   On the launches that test extrapolation best, the revised model is
-//   clearly better: leave-biggest-out 0.102 (was 0.107), leave-top-3-out
-//   0.130 (was 0.145). The kernel is local, so a GTA VI hour-1 print
-//   above every fitted launch weights the biggest launches (ELDEN RING,
+//   multiplied by 0.85 (chosen by LOO pinball, not by coverage).
+//   Tried and dropped, because they did not improve LOO (all numbers are
+//   leave-one-out pinball on the 37 launches; this model: 0.391 all /
+//   0.254 big / 0.096 leave-biggest-out / 0.123 leave-top-3-out, against
+//   0.398 / 0.257 / 0.102 / 0.130 for the previous Gaussian version):
+//   Gaussian kernels at bw 0.5-2.0, fixed-k nearest neighbours, adaptive
+//   bandwidth, a weighted-mean centre, a local-linear centre (better LOO
+//   overall, 0.384-0.387, but worse leave-top-3-out, 0.132-0.140), a
+//   local-linear + Epanechnikov ensemble (close second: LOO all 0.388,
+//   leave-top-3 0.128, but worse leave-top-8-out), per-hour OLS
+//   regression on ln(hour-1) and on ln(hour-1)+log-spike (catastrophic
+//   out-of-range: leave-biggest 0.45), a parametric step-basis shape model
+//   (leave-biggest 0.58), ensembles with the regression/parametric models
+//   or the house baseline (they inherit the regression's extrapolation
+//   failure), a 2D kernel on ln(hour-1)+log-spike (much better
+//   leave-top-3, 0.108, but LOO all 0.46-0.47), a 2D kernel on
+//   ln(hour-1)+shareEU (no gain on the extrapolation metrics), FPCA K=2
+//   (helps LOO overall but hurts the biggest launches), centre shrinkage
+//   toward the big-launch pooled shape (badly worse), a Student-t spread,
+//   a residual-based spread, an empirical-quantile spread, a two-piece
+//   (asymmetric) spread (better LOO all and leave-top-3, worse
+//   leave-biggest), widening the spread out-of-range, and adding the four
+//   practice launches to the training set (hurts the biggest launches:
+//   the mid-size launches dilute the weight on the biggest ones).
+//   Leave-one-out over the 37 fitted launches: mean pinball loss 0.391
+//   (0.254 on the 27 launches with hour-1 >= 20k), leave-biggest-out
+//   0.096, leave-top-3-out 0.123, leave-top-5-out 0.144, leave-top-8-out
+//   0.225, against 0.930 (0.321) for the house persistence baseline.
+//   The implementation was checked against the offline LOO harness:
+//   its median log-ratios on synthetic cases agree with the harness's
+//   winner prediction to within 0.00004 log units (the 6-decimal FPCA
+//   constants). What it predicts for a hypothetical GTA VI hour-1 print
+//   (median ratio, peak hour): 100k -> 1.75x at hour 22; 300k -> 1.29x
+//   at hour 20; 1M -> 0.99x at hour 20; 2M -> 0.93x at hour 2 (never
+//   above hour 1). The kernel is local, so a GTA VI hour-1 print above
+//   every fitted launch weights the biggest launches (ELDEN RING,
 //   Cyberpunk 2077) most; the shrunk slope then carries it a little
 //   further in the direction the data point.
 //
@@ -78,12 +108,12 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
 /** The standard normal's quantile at each level. */
 const Z = [-1.6448536269514722, -0.6744897501960817, 0, 0.6744897501960817, 1.6448536269514722];
-/** Kernel bandwidth, in units of ln(hour-1 viewers). */
-const BANDWIDTH = 1.0;
+/** Epanechnikov kernel bandwidth, in units of ln(hour-1 viewers). */
+const BANDWIDTH = 2.0;
 /** Smallest spread we ever quote, in log units. */
 const SD_FLOOR = 0.25;
 /** Spread multiplier, chosen by leave-one-out pinball (not by coverage). */
-const MULT = 0.9;
+const MULT = 0.85;
 /**
  * Shrunk local-linear slope (OLS slope of log-ratio on ln hour-1, shrunk by
  * 0.25 and smoothed within the unlock segments), fitted on all 37 launches.
@@ -93,6 +123,14 @@ const MULT = 0.9;
 const SLOPE: number[] = [0.0054, -0.0013, -0.006, -0.0086, -0.0107, -0.0271, -0.0431, -0.077, -0.1078, -0.128, -0.1403, -0.1554, -0.174, -0.1936, -0.2092, -0.2208, -0.2271, -0.2315, -0.2337, -0.2338, -0.232, -0.2292, -0.2262];
 /** Unlock segments (hour index j = hour - 2): hours [2-5], [6-8], [9-24]. */
 const SEGMENTS: Array<[number, number]> = [[0, 3], [4, 6], [7, 22]];
+/**
+ * First functional principal component of the 37 fitted launch curves:
+ * FPCA_MEAN is the mean log-ratio curve, FPCA_PC1 is the first principal
+ * component (88% of the total shape variance). The centre is averaged
+ * 50/50 with its projection onto this component.
+ */
+const FPCA_MEAN: number[] = [-0.080826, -0.226724, -0.265404, -0.238624, -0.171466, -0.100659, -0.002888, 0.125699, 0.308195, 0.387, 0.49372, 0.722719, 0.933983, 1.148941, 1.356134, 1.484725, 1.603797, 1.713729, 1.742758, 1.759648, 1.721227, 1.637504, 1.51097];
+const FPCA_PC1: number[] = [-0.00316, 0.012982, 0.025891, 0.027241, 0.031572, 0.051694, 0.071461, 0.113305, 0.165994, 0.179905, 0.191189, 0.212589, 0.235389, 0.257282, 0.277171, 0.284656, 0.287433, 0.282767, 0.281669, 0.283875, 0.282243, 0.277891, 0.276208];
 
 /**
  * Recorded launch-day counts (SullyGnome "Average viewers", the same
@@ -206,19 +244,33 @@ function smoothSegments(values: number[]): number[] {
 }
 
 /**
+ * The centre averaged 50/50 with its projection onto the first functional
+ * principal component: recon = FPCA_MEAN + score * FPCA_PC1, where
+ * score = (centre - FPCA_MEAN) . FPCA_PC1.
+ */
+function fpcaBlend(centre: number[]): number[] {
+  const score = centre.reduce((s, m, j) => s + (m - FPCA_MEAN[j]) * FPCA_PC1[j], 0);
+  return centre.map((m, j) => 0.5 * m + 0.5 * (FPCA_MEAN[j] + score * FPCA_PC1[j]));
+}
+
+/**
  * The forecast for one case: five quantiles per hour, hours 2..24.
- * mu[h] is the kernel-weighted median log-ratio for that hour, plus the
- * shrunk slope when ln(hour-1) is out of range, smoothed within unlock
- * segments; sd[h] is the kernel-weighted spread around that centre, its
+ * mu[h] is the Epanechnikov-kernel-weighted median log-ratio for that hour,
+ * plus the shrunk slope when ln(hour-1) is out of range, smoothed within
+ * unlock segments and averaged with its first-principal-component
+ * projection; sd[h] is the kernel-weighted spread around that centre, its
  * log smoothed within the same segments, then multiplied by MULT.
  */
 function forecast(p1: number, hours: number[]): Array<{ hour: number; q: number[] }> {
   const lp = Math.log(p1);
-  const rawWeights = FIT_LOGP1.map((x) => Math.exp(-((x - lp) ** 2) / (2 * BANDWIDTH * BANDWIDTH)));
-  // Degenerate guard: if every kernel weight underflowed to zero (an hour-1
-  // print absurdly far outside the fitted range), fall back to uniform
-  // weights so the median and spread stay defined. Never triggers for any
-  // realistic print.
+  const rawWeights = FIT_LOGP1.map((x) => {
+    const u = (x - lp) / BANDWIDTH;
+    return Math.abs(u) < 1 ? 0.75 * (1 - u * u) : 0;
+  });
+  // Degenerate guard: if every kernel weight is zero (an hour-1 print
+  // absurdly far outside the fitted range, beyond one bandwidth of every
+  // launch), fall back to uniform weights so the median and spread stay
+  // defined. Never triggers for any realistic print.
   const totalW = rawWeights.reduce((a, b) => a + b, 0);
   const weights = totalW > 0 && Number.isFinite(totalW) ? rawWeights : FIT_LOGP1.map(() => 1);
   const xmin = Math.min(...FIT_LOGP1);
@@ -229,7 +281,7 @@ function forecast(p1: number, hours: number[]): Array<{ hour: number; q: number[
     const vals = FIT_LR.map((row) => row[j]);
     mu.push(weightedMedian(vals, weights) + SLOPE[j] * delta);
   }
-  mu = smoothSegments(mu);
+  mu = fpcaBlend(smoothSegments(mu));
   let sd: number[] = [];
   for (let j = 0; j < 23; j++) {
     const vals = FIT_LR.map((row) => row[j]);
